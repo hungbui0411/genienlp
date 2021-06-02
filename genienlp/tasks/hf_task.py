@@ -135,3 +135,40 @@ class CONLLNER(HFTask):
             if split:
                 split.is_classification = True
         return splits, paths
+
+
+@register_task('few-nerd')
+class FEW_NERD(HFTask):
+    tagging_scheme = 'IOB2'
+
+    def __init__(self, name, args):
+        self.num_labels = 200
+        self.all_labels = tuple(map(str, range(self.num_labels)))
+        self.label2id = {k: int(k) for k in self.all_labels}
+        self.id2label = {int(v): k for k, v in self.label2id.items()}
+        super().__init__(name, args)
+
+    @property
+    def metrics(self):
+        return ['ner_f1', 'em', 'f1', 'pem']
+
+    def utterance_field(self):
+        return 'context'
+
+    def _make_example(self, ex, **kwargs):
+        example_id = ex['id']
+        context = ' '.join(ex['tokens'])
+        question = ''
+        answer = ' '.join(map(lambda item: str(20 * item[0] + item[1]), zip(ex['course_tags'], ex['fine_tags'])))
+
+        return Example.from_raw(
+            self.name + '/' + example_id, context, question, answer, preprocess=self.preprocess_field, lower=False
+        )
+
+    def get_splits(self, root, **kwargs):
+        kwargs['config_name'] = 'supervised'
+        splits, paths = HFDataset.return_splits(name=self.name, path=root, make_example=self._make_example, **kwargs)
+        for split in splits:
+            if split:
+                split.is_classification = True
+        return splits, paths
