@@ -34,8 +34,6 @@ from collections import defaultdict
 
 import ujson
 from elasticsearch import Elasticsearch, RequestsHttpConnection, exceptions
-from elasticsearch.client import XPackClient
-from elasticsearch.client.utils import NamespacedClient
 
 from .database import is_banned
 from .database_utils import has_overlap, normalize_text
@@ -46,11 +44,6 @@ tracer = logging.getLogger('elasticsearch')
 tracer.setLevel(logging.CRITICAL)
 
 logger = logging.getLogger(__name__)
-
-
-class XPackClientMPCompatible(XPackClient):
-    def __getattr__(self, attr_name):
-        return NamespacedClient.__getattribute__(self, attr_name)
 
 
 class RemoteElasticDatabase(object):
@@ -74,9 +67,6 @@ class RemoteElasticDatabase(object):
             connection_class=RequestsHttpConnection,
             maxsize=8,
         )
-
-        # use xpack client that is compatible with multiprocessing
-        self.es.xpack = XPackClientMPCompatible(self.es)
 
     def lookup(self, tokens, min_entity_len=2, max_entity_len=4, answer_entities=None):
 
@@ -255,16 +245,12 @@ class RemoteElasticDatabase(object):
 
         return all_tokens_type_ids
 
-    def es_dump(self, mode):
+    def es_dump(self):
 
-        assert mode in ['canonical2type', 'typeqid2id'], 'Mode not supported; use either canonical2type or typeqid2id'
-
-        if mode == 'canonical2type':
-            return_dict = defaultdict(list)
-            dump_file_name = 'canonical2type'
-        elif mode == 'typeqid2id':
-            return_dict = defaultdict(int)
-            dump_file_name = 'typeqid2id'
+        canonical2type = defaultdict(list)
+        canonical2qid = defaultdict(str)
+        typeqid2id = defaultdict(int)
+        typeqid2id['unk'] = 0
 
         begin = time.time()
 
@@ -280,14 +266,17 @@ class RemoteElasticDatabase(object):
                 return None, -1
             print("total docs:", total_values)
             for match in result["hits"]["hits"]:
-                if mode == 'canonical2type':
-                    return_dict[match['_source']['canonical']].append(match['_source']['type'][len('org.wikidata:') :])
-                elif mode == 'typeqid2id':
-                    if match['_source']['type'] not in return_dict:
-                        return_dict[match['_source']['type']] = len(self.typeqid2id)
+                source = match['_source']
+                # name, type, value, canonical, aliases, description = match['_source']
+                type, value, canonical = source['type'], source['value'], source['canonical']
+                type = type[len('org.wikidata:') :]
+                canonical2type[canonical].append(type)
+                canonical2qid[canonical] = value
+                if type not in typeqid2id:
+                    typeqid2id[type] = len(typeqid2id)
 
             scroll_id = result['_scroll_id']
-            print('processed: {}, time elapsed: {}'.format(i, time.time() - begin))
+            print('processed: {:.0f}, time elapsed: {:.2f}'.format(total_values / 10000, time.time() - begin))
 
             return scroll_id, total_values
 
@@ -296,10 +285,13 @@ class RemoteElasticDatabase(object):
         chunk = 0
         while True:
             if total_values % 4000000 == 0:
-                with open(f'{dump_file_name}_{chunk}.json', 'w') as fout:
-                    ujson.dump(return_dict, fout, ensure_ascii=True)
+                with open(f'canonical2type_{chunk}.json', 'w') as fout:
+                    ujson.dump(canonical2type, fout, ensure_ascii=True)
+                with open(f'canonical2qid_{chunk}.json', 'w') as fout:
+                    ujson.dump(canonical2qid, fout, ensure_ascii=True)
                 chunk += 1
-                return_dict.clear()
+                canonical2type.clear()
+                canonical2qid.clear()
             try:
                 scroll_id, total_values = do_search(scroll_id, total_values)
                 if scroll_id is None and total_values == -1:
@@ -309,5 +301,10 @@ class RemoteElasticDatabase(object):
                 break
 
         # dump any remaining values
-        with open(f'{dump_file_name}_{chunk}.json', 'w') as fout:
-            ujson.dump(return_dict, fout, ensure_ascii=True)
+        with open(f'canonical2type_{chunk}.json', 'w') as fout:
+            ujson.dump(canonical2type, fout, ensure_ascii=True)
+        with open(f'canonical2qid_{chunk}.json', 'w') as fout:
+            ujson.dump(canonical2qid, fout, ensure_ascii=True)
+
+        with open(f'typeqid2id_{chunk}.json', 'w') as fout:
+            ujson.dump(typeqid2id, fout, ensure_ascii=True)
